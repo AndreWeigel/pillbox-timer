@@ -16,7 +16,9 @@ last lid-open, which the firmware already tracks.
 Two modes, selected by a flag today (`DEFAULT_MODE` in `firmware/pillbox-timer`),
 by a physical button later:
 
-- **Dose status** — knows the dosing interval; shows `NEXT <t>` / `DUE NOW` / `OVER <t>`.
+- **Dose status** — three states from time since last open: `DONE` (within the
+  done window), `TAKE` (due), `OVERDUE` (well past due), each a big headline plus
+  a small subtitle. Interval-based, so no wall-clock time is needed.
 - **Last opened** — passive log; shows `JUST NOW` / `<t> AGO`.
 
 ## Status
@@ -27,12 +29,13 @@ by a physical button later:
 - [x] SSD1681 e-paper driver, bit-banged SPI (`firmware/04-eink`)
 - [x] Integration: reed wake + RTC PIT timekeeping + 5x7 text (`firmware/pillbox-timer`)
 - [x] Fix display orientation (180° rotation)
-- [ ] Dual display mode (dose status + last opened) behind a flag
+- [x] Dual display mode (dose status + last opened) behind a flag
+- [x] Dose status as DONE / TAKE / OVERDUE states with headline + subtitle
 
 ## Backlog
 
 ### Firmware
-- [ ] Dual display mode behind `DEFAULT_MODE` flag (in progress)
+- [ ] Subtitle in lowercase instead of small caps, if the softer look is wanted
 - [ ] Coarsen refresh cadence for battery — last-opened mode currently refreshes
       every minute for the first hour (~10x over the 0.041 mAh/day budget).
       Dose mode is naturally coarse (changes hourly).

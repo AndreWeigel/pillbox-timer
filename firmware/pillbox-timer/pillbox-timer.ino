@@ -1,8 +1,8 @@
 // Pillbox Timer — integration firmware.
 // Tracks time since the lid was last opened (magnet leaves the reed switch) and
 // shows one of two displays, selected by DEFAULT_MODE below:
-//   MODE_DOSE_STATUS   "NEXT 5H" / "DUE NOW" / "OVER 2H" — interval-based
-//   MODE_LAST_OPENED   "JUST NOW" / "7H AGO"            — passive log
+//   MODE_DOSE_STATUS   DONE / TAKE / OVERDUE headline + subtitle — interval-based
+//   MODE_LAST_OPENED   "JUST NOW" / "7H AGO"                     — passive log
 // The RTC's periodic interrupt wakes the chip once per second to keep counting,
 // and the display is refreshed only when the shown text would actually change.
 //
@@ -42,10 +42,10 @@
 #define MODE_DOSE_STATUS 1
 #define DEFAULT_MODE     MODE_DOSE_STATUS   // change to switch modes (button later)
 
-// Dose schedule (dose-status mode only). For bench testing, drop the interval
-// to e.g. 300UL (5 min) so the countdown visibly changes.
-#define DOSE_INTERVAL_SEC 86400UL   // take every 24 h
-#define DOSE_GRACE_SEC     3600UL   // show "DUE NOW" for 1 h before "OVER <t>"
+// Dose schedule (dose-status mode only), measured from the last lid-open.
+// For bench testing, shrink these (e.g. 20UL and 40UL) so states change fast.
+#define DOSE_DONE_SEC     72000UL   // 20 h: show "DONE" within this window
+#define DOSE_OVERDUE_SEC 100800UL   // 28 h: show "OVERDUE" past this (8 h late)
 
 uint8_t displayMode = DEFAULT_MODE;   // runtime var so a button can flip it later
 
@@ -54,7 +54,7 @@ uint8_t displayMode = DEFAULT_MODE;   // runtime var so a button can flip it lat
 // bit4 = leftmost. FONT_CHARS gives the character at each glyph index.
 // ---------------------------------------------------------------------------
 
-static const char FONT_CHARS[] = " 0123456789ADGHJMNOSTUWERVX";
+static const char FONT_CHARS[] = " 0123456789ADGHJMNOSTUWERVXIKLP";
 
 static const uint8_t FONT[][7] = {
   {0b00000,0b00000,0b00000,0b00000,0b00000,0b00000,0b00000}, // ' '
@@ -84,6 +84,10 @@ static const uint8_t FONT[][7] = {
   {0b11110,0b10001,0b10001,0b11110,0b10100,0b10010,0b10001}, // R
   {0b10001,0b10001,0b10001,0b10001,0b10001,0b01010,0b00100}, // V
   {0b10001,0b10001,0b01010,0b00100,0b01010,0b10001,0b10001}, // X
+  {0b01110,0b00100,0b00100,0b00100,0b00100,0b00100,0b01110}, // I
+  {0b10001,0b10010,0b10100,0b11000,0b10100,0b10010,0b10001}, // K
+  {0b10000,0b10000,0b10000,0b10000,0b10000,0b10000,0b11111}, // L
+  {0b11110,0b10001,0b10001,0b11110,0b10000,0b10000,0b10000}, // P
 };
 
 static int glyphIndex(char c) {
@@ -92,25 +96,25 @@ static int glyphIndex(char c) {
 }
 
 // ---------------------------------------------------------------------------
-// Band buffer: one horizontal strip tall enough for scaled text. We can't hold
-// a full 200x200 frame (5000 bytes > 2KB SRAM), so only the text band is
-// buffered; everything above/below streams as white.
+// Text layout: a big headline line plus a smaller subtitle line. We can't hold
+// a full 200x200 frame (5000 bytes > 2KB SRAM), so each line is rendered into
+// its own horizontal band buffer; rows outside both bands stream as white.
 // ---------------------------------------------------------------------------
 
-#define SCALE    4
-#define BAND_H   (7 * SCALE)            // 28 px
-#define BAND_TOP ((200 - BAND_H) / 2)   // vertically centered
-static uint8_t band[BAND_H * 25];       // 700 bytes; 0 = black, 1 = white
+#define BIG_SCALE 4
+#define BIG_H     (7 * BIG_SCALE)   // 28 px
+#define BIG_TOP   76               // top row of the headline band
+#define SUB_SCALE 2
+#define SUB_H     (7 * SUB_SCALE)   // 14 px
+#define SUB_TOP   118              // top row of the subtitle band
 
-static void bandSetBlack(int x, int y) {
-  if (x < 0 || x >= 200 || y < 0 || y >= BAND_H) return;
-  band[y * 25 + (x >> 3)] &= ~(0x80 >> (x & 7));
-}
+static uint8_t bigBand[BIG_H * 25];   // 700 bytes; 0 = black, 1 = white
+static uint8_t subBand[SUB_H * 25];   // 350 bytes
 
-static void renderText(const char* s) {
-  memset(band, 0xFF, sizeof(band));     // white background
-  int len = strlen(s);
-  int width = len * 6 * SCALE - SCALE;  // ink width (5 px glyph + 1 px gap)
+// Render a centered, scaled string into a band buffer (bandH rows tall).
+static void renderLine(uint8_t* buf, int bandH, const char* s, int scale) {
+  memset(buf, 0xFF, bandH * 25);                 // white background
+  int width = (int)strlen(s) * 6 * scale - scale;  // ink width
   int penX = (200 - width) / 2;
   if (penX < 0) penX = 0;
   for (int i = 0; s[i]; i++) {
@@ -119,13 +123,17 @@ static void renderText(const char* s) {
       uint8_t bits = FONT[gi][gy];
       for (int gx = 0; gx < 5; gx++) {
         if (bits & (1 << (4 - gx))) {
-          for (int dy = 0; dy < SCALE; dy++)
-            for (int dx = 0; dx < SCALE; dx++)
-              bandSetBlack(penX + gx * SCALE + dx, gy * SCALE + dy);
+          for (int dy = 0; dy < scale; dy++)
+            for (int dx = 0; dx < scale; dx++) {
+              int x = penX + gx * scale + dx;
+              int y = gy * scale + dy;
+              if (x >= 0 && x < 200 && y >= 0 && y < bandH)
+                buf[y * 25 + (x >> 3)] &= ~(0x80 >> (x & 7));
+            }
         }
       }
     }
-    penX += 6 * SCALE;
+    penX += 6 * scale;
   }
 }
 
@@ -203,23 +211,28 @@ static uint8_t reverseBits(uint8_t b) {
   return b;
 }
 
+// Fill a 25-byte row from whichever band covers it, else white.
+static void srcRowBytes(int row, uint8_t* dst) {
+  if (row >= BIG_TOP && row < BIG_TOP + BIG_H) {
+    memcpy(dst, &bigBand[(row - BIG_TOP) * 25], 25);
+  } else if (row >= SUB_TOP && row < SUB_TOP + SUB_H) {
+    memcpy(dst, &subBand[(row - SUB_TOP) * 25], 25);
+  } else {
+    memset(dst, 0xFF, 25);                 // white
+  }
+}
+
 // Streams the frame rotated 180° so text reads upright relative to the flex
 // cable: rows bottom-to-top, and each row mirrored horizontally (byte order
 // reversed + bits within each byte reversed). 200 px == exactly 25 bytes, so
 // the horizontal mirror is exact with no pixel offset.
-static void epd_draw_band() {
+static void epd_draw_frame() {
   epd_cmd(0x24);                         // write B/W RAM
   digitalWrite(DC_PIN, HIGH);
   digitalWrite(CS_PIN, LOW);
   for (int outRow = 0; outRow < 200; outRow++) {
-    int srcRow = 199 - outRow;
     uint8_t rowBytes[25];
-    if (srcRow >= BAND_TOP && srcRow < BAND_TOP + BAND_H) {
-      uint8_t* br = &band[(srcRow - BAND_TOP) * 25];
-      for (int col = 0; col < 25; col++) rowBytes[col] = br[col];
-    } else {
-      for (int col = 0; col < 25; col++) rowBytes[col] = 0xFF;  // white
-    }
+    srcRowBytes(199 - outRow, rowBytes);
     for (int ob = 0; ob < 25; ob++) spiByte(reverseBits(rowBytes[24 - ob]));
   }
   digitalWrite(CS_PIN, HIGH);
@@ -235,10 +248,12 @@ static void epd_deep_sleep() {
   epd_cmd(0x10); epd_dat(0x01);          // panel deep sleep — holds image at 0 power
 }
 
-static void showText(const char* s) {
-  renderText(s);
+// Show a big headline plus a subtitle. Pass "" for sub to leave it blank.
+static void showText(const char* big, const char* sub) {
+  renderLine(bigBand, BIG_H, big, BIG_SCALE);
+  renderLine(subBand, SUB_H, sub, SUB_SCALE);
   epd_init();        // panel was deep-asleep; reset + re-init to wake it
-  epd_draw_band();
+  epd_draw_frame();
   epd_refresh();
   epd_deep_sleep();
 }
@@ -250,7 +265,8 @@ static void showText(const char* s) {
 volatile uint32_t elapsedSec = 0;
 volatile bool tickFlag = false;
 volatile bool lidFlag  = false;
-char lastShown[16] = "";
+char lastBig[16] = "";
+char lastSub[16] = "";
 
 ISR(RTC_PIT_vect) {
   RTC.PITINTFLAGS = RTC_PI_bm;   // clear the interrupt
@@ -281,30 +297,30 @@ static void fmtDur(uint32_t s, char* buf) {
   *p = '\0';
 }
 
-// Build the display string for the active mode. Kept to <= 8 chars so it fits
-// one line at the current text scale.
+// Build the headline (big) and subtitle (small) for the active mode.
+// Headline stays <= 8 chars to fit one line at the big scale; subtitle is small.
 //
 // NOTE: in last-opened mode the minute resolution means a full refresh (with
 // its ~2s flash) every minute for the first hour — fine for the bench, but
 // coarsen for production (see ROADMAP). Dose mode changes at most hourly.
-static void formatStatus(uint32_t sec, char* out) {
+static void formatStatus(uint32_t sec, char* big, char* sub) {
   if (displayMode == MODE_DOSE_STATUS) {
-    if (sec < DOSE_INTERVAL_SEC) {
-      strcpy(out, "NEXT ");
-      fmtDur(DOSE_INTERVAL_SEC - sec, out + 5);   // "NEXT 5H"
-    } else {
-      uint32_t over = sec - DOSE_INTERVAL_SEC;
-      if (over < DOSE_GRACE_SEC) {
-        strcpy(out, "DUE NOW");
-      } else {
-        strcpy(out, "OVER ");
-        fmtDur(over, out + 5);                     // "OVER 2H"
-      }
+    if (sec < DOSE_DONE_SEC) {              // still within the done window
+      strcpy(big, "DONE");
+      strcpy(sub, "PILLS TAKEN");
+    } else if (sec < DOSE_OVERDUE_SEC) {    // dose is due
+      strcpy(big, "TAKE");
+      strcpy(sub, "PILLS DUE NOW");
+    } else {                                // well past due
+      strcpy(big, "OVERDUE");
+      fmtDur(sec - DOSE_DONE_SEC, sub);     // how long it has been due
+      strcat(sub, " LATE");                 // e.g. "9H LATE"
     }
   } else {  // MODE_LAST_OPENED
-    if (sec < 60) { strcpy(out, "JUST NOW"); return; }
-    fmtDur(sec, out);
-    strcat(out, " AGO");                            // "7H AGO"
+    sub[0] = '\0';                          // no subtitle
+    if (sec < 60) { strcpy(big, "JUST NOW"); return; }
+    fmtDur(sec, big);
+    strcat(big, " AGO");                    // "7H AGO"
   }
 }
 
@@ -338,8 +354,8 @@ void setup() {
   }
 
   elapsedSec = 0;
-  formatStatus(0, lastShown);
-  showText(lastShown);
+  formatStatus(0, lastBig, lastSub);
+  showText(lastBig, lastSub);
 }
 
 void loop() {
@@ -358,10 +374,11 @@ void loop() {
     digitalWrite(LED_PIN, HIGH); delay(100); digitalWrite(LED_PIN, LOW);
   }
 
-  char buf[16];
-  formatStatus(sec, buf);
-  if (strcmp(buf, lastShown) != 0) {  // only refresh when the text changes
-    strcpy(lastShown, buf);
-    showText(buf);
+  char big[16], sub[16];
+  formatStatus(sec, big, sub);
+  if (strcmp(big, lastBig) != 0 || strcmp(sub, lastSub) != 0) {  // refresh on change
+    strcpy(lastBig, big);
+    strcpy(lastSub, sub);
+    showText(big, sub);
   }
 }
