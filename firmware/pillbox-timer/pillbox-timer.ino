@@ -1,8 +1,10 @@
 // Pillbox Timer — integration firmware.
-// Shows "last opened X ago" on the e-paper. Opening the lid (magnet leaves the
-// reed switch) resets the timer to "JUST NOW". The RTC's periodic interrupt
-// wakes the chip once per second to keep counting, and the display is refreshed
-// only when the shown text would actually change.
+// Tracks time since the lid was last opened (magnet leaves the reed switch) and
+// shows one of two displays, selected by DEFAULT_MODE below:
+//   MODE_DOSE_STATUS   "NEXT 5H" / "DUE NOW" / "OVER 2H" — interval-based
+//   MODE_LAST_OPENED   "JUST NOW" / "7H AGO"            — passive log
+// The RTC's periodic interrupt wakes the chip once per second to keep counting,
+// and the display is refreshed only when the shown text would actually change.
 //
 // Power: chip sleeps in POWER-DOWN (~1µA). The PIT runs off the internal 32kHz
 // oscillator and still ticks in power-down; the reed switch is on a fully
@@ -35,12 +37,24 @@
 #define RST_PIN  6
 #define BUSY_PIN 7
 
+// --- display mode -----------------------------------------------------------
+#define MODE_LAST_OPENED 0
+#define MODE_DOSE_STATUS 1
+#define DEFAULT_MODE     MODE_DOSE_STATUS   // change to switch modes (button later)
+
+// Dose schedule (dose-status mode only). For bench testing, drop the interval
+// to e.g. 300UL (5 min) so the countdown visibly changes.
+#define DOSE_INTERVAL_SEC 86400UL   // take every 24 h
+#define DOSE_GRACE_SEC     3600UL   // show "DUE NOW" for 1 h before "OVER <t>"
+
+uint8_t displayMode = DEFAULT_MODE;   // runtime var so a button can flip it later
+
 // ---------------------------------------------------------------------------
 // 5x7 font. Each glyph is 7 rows; the low 5 bits of each row are pixels,
 // bit4 = leftmost. FONT_CHARS gives the character at each glyph index.
 // ---------------------------------------------------------------------------
 
-static const char FONT_CHARS[] = " 0123456789ADGHJMNOSTUW";
+static const char FONT_CHARS[] = " 0123456789ADGHJMNOSTUWERVX";
 
 static const uint8_t FONT[][7] = {
   {0b00000,0b00000,0b00000,0b00000,0b00000,0b00000,0b00000}, // ' '
@@ -66,6 +80,10 @@ static const uint8_t FONT[][7] = {
   {0b11111,0b00100,0b00100,0b00100,0b00100,0b00100,0b00100}, // T
   {0b10001,0b10001,0b10001,0b10001,0b10001,0b10001,0b01110}, // U
   {0b10001,0b10001,0b10001,0b10101,0b10101,0b11011,0b10001}, // W
+  {0b11111,0b10000,0b10000,0b11110,0b10000,0b10000,0b11111}, // E
+  {0b11110,0b10001,0b10001,0b11110,0b10100,0b10010,0b10001}, // R
+  {0b10001,0b10001,0b10001,0b10001,0b10001,0b01010,0b00100}, // V
+  {0b10001,0b10001,0b01010,0b00100,0b01010,0b10001,0b10001}, // X
 };
 
 static int glyphIndex(char c) {
@@ -249,24 +267,45 @@ static void rtcPitInit() {
   RTC.PITCTRLA = RTC_PERIOD_CYC32768_gc | RTC_PITEN_bm;    // 32768/32768 Hz = 1 s
 }
 
-// Build "last opened" text. Shows minutes for the first hour, then hours,
-// then days. NOTE: minute-resolution means a full refresh (with its ~2s flash)
-// every minute for the first hour — fine for the bench, but coarsen this for
-// production to protect battery life and avoid constant flashing.
-static void formatElapsed(uint32_t s, char* out) {
-  if (s < 60) { strcpy(out, "JUST NOW"); return; }
+// Append a compact duration ("45M", "5H", "3D") at the start of buf.
+// Resolution: minutes under an hour, then hours, then days.
+static void fmtDur(uint32_t s, char* buf) {
   unsigned long v;
   char unit;
   if (s < 3600UL)       { v = s / 60UL;    unit = 'M'; }
   else if (s < 86400UL) { v = s / 3600UL;  unit = 'H'; }
   else                  { v = s / 86400UL; unit = 'D'; }
-  char* p = out;
-  char num[12];
-  ultoa(v, num, 10);
-  for (char* q = num; *q; q++) *p++ = *q;
+  ultoa(v, buf, 10);
+  char* p = buf + strlen(buf);
   *p++ = unit;
-  *p++ = ' '; *p++ = 'A'; *p++ = 'G'; *p++ = 'O';
   *p = '\0';
+}
+
+// Build the display string for the active mode. Kept to <= 8 chars so it fits
+// one line at the current text scale.
+//
+// NOTE: in last-opened mode the minute resolution means a full refresh (with
+// its ~2s flash) every minute for the first hour — fine for the bench, but
+// coarsen for production (see ROADMAP). Dose mode changes at most hourly.
+static void formatStatus(uint32_t sec, char* out) {
+  if (displayMode == MODE_DOSE_STATUS) {
+    if (sec < DOSE_INTERVAL_SEC) {
+      strcpy(out, "NEXT ");
+      fmtDur(DOSE_INTERVAL_SEC - sec, out + 5);   // "NEXT 5H"
+    } else {
+      uint32_t over = sec - DOSE_INTERVAL_SEC;
+      if (over < DOSE_GRACE_SEC) {
+        strcpy(out, "DUE NOW");
+      } else {
+        strcpy(out, "OVER ");
+        fmtDur(over, out + 5);                     // "OVER 2H"
+      }
+    }
+  } else {  // MODE_LAST_OPENED
+    if (sec < 60) { strcpy(out, "JUST NOW"); return; }
+    fmtDur(sec, out);
+    strcat(out, " AGO");                            // "7H AGO"
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -299,7 +338,7 @@ void setup() {
   }
 
   elapsedSec = 0;
-  strcpy(lastShown, "JUST NOW");
+  formatStatus(0, lastShown);
   showText(lastShown);
 }
 
@@ -320,7 +359,7 @@ void loop() {
   }
 
   char buf[16];
-  formatElapsed(sec, buf);
+  formatStatus(sec, buf);
   if (strcmp(buf, lastShown) != 0) {  // only refresh when the text changes
     strcpy(lastShown, buf);
     showText(buf);
