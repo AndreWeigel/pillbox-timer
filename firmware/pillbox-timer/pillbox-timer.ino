@@ -96,17 +96,23 @@ static int glyphIndex(char c) {
 }
 
 // ---------------------------------------------------------------------------
-// Text layout: a big headline line plus a smaller subtitle line. We can't hold
-// a full 200x200 frame (5000 bytes > 2KB SRAM), so each line is rendered into
-// its own horizontal band buffer; rows outside both bands stream as white.
+// Screen layout (top to bottom): big headline, capsule pill icon, small
+// subtitle. We can't hold a full 200x200 frame (5000 bytes > 2KB SRAM), so the
+// two text lines are rendered into band buffers and the pill is drawn
+// procedurally during streaming; rows outside all three stream as white.
 // ---------------------------------------------------------------------------
 
 #define BIG_SCALE 4
 #define BIG_H     (7 * BIG_SCALE)   // 28 px
-#define BIG_TOP   76               // top row of the headline band
+#define BIG_TOP   28               // headline near the top
 #define SUB_SCALE 2
 #define SUB_H     (7 * SUB_SCALE)   // 14 px
-#define SUB_TOP   118              // top row of the subtitle band
+#define SUB_TOP   160              // subtitle near the bottom
+
+// Capsule pill icon in the middle (drawn procedurally, no buffer).
+#define PILL_W   84
+#define PILL_H   34
+#define PILL_TOP 86                // rows 86..119, centered around y=103
 
 static uint8_t bigBand[BIG_H * 25];   // 700 bytes; 0 = black, 1 = white
 static uint8_t subBand[SUB_H * 25];   // 350 bytes
@@ -211,10 +217,40 @@ static uint8_t reverseBits(uint8_t b) {
   return b;
 }
 
-// Fill a 25-byte row from whichever band covers it, else white.
+// Is (x,y) inside a horizontal capsule of size W x H, shrunk by `inset`?
+// The capsule is a rectangle with semicircular left/right ends.
+static bool inCapsule(int x, int y, int W, int H, int inset) {
+  int r = H / 2, cy = H / 2;
+  int left = r, right = W - 1 - r;
+  int rr = r - inset;
+  if (rr < 0) return false;
+  if (x < left)  { int dx = x - left,  dy = y - cy; return dx * dx + dy * dy <= rr * rr; }
+  if (x > right) { int dx = x - right, dy = y - cy; return dx * dx + dy * dy <= rr * rr; }
+  return (y >= cy - rr && y <= cy + rr);
+}
+
+// Render one row of the two-tone capsule pill into a 25-byte (200 px) row:
+// black outline, left half filled black, right half empty — reads as a pill.
+static void pillRow(int y, uint8_t* dst) {
+  memset(dst, 0xFF, 25);
+  const int x0 = (200 - PILL_W) / 2;        // centered horizontally
+  for (int px = 0; px < PILL_W; px++) {
+    if (!inCapsule(px, y, PILL_W, PILL_H, 0)) continue;
+    bool inner = inCapsule(px, y, PILL_W, PILL_H, 3);
+    bool black = !inner || (px < PILL_W / 2);   // border, or left half fill
+    if (black) {
+      int x = x0 + px;
+      dst[x >> 3] &= ~(0x80 >> (x & 7));
+    }
+  }
+}
+
+// Fill a 25-byte row from whichever element covers it, else white.
 static void srcRowBytes(int row, uint8_t* dst) {
   if (row >= BIG_TOP && row < BIG_TOP + BIG_H) {
     memcpy(dst, &bigBand[(row - BIG_TOP) * 25], 25);
+  } else if (row >= PILL_TOP && row < PILL_TOP + PILL_H) {
+    pillRow(row - PILL_TOP, dst);
   } else if (row >= SUB_TOP && row < SUB_TOP + SUB_H) {
     memcpy(dst, &subBand[(row - SUB_TOP) * 25], 25);
   } else {
