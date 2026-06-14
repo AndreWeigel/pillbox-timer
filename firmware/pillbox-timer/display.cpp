@@ -148,7 +148,8 @@ static void renderInto(const char* big, const char* sub) {
 // lastSub — so we never need to keep a full framebuffer around.
 // ---------------------------------------------------------------------------
 
-#define FULL_REFRESH_EVERY 5   // 1 full refresh per this many screen changes
+#define FULL_REFRESH_EVERY 20  // 1 full (flashing) refresh per this many changes;
+                               // higher = rarer flash, but ghosting builds up more
 
 static char lastBig[16] = "";
 static char lastSub[16] = "";

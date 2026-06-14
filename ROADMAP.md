@@ -32,8 +32,10 @@ by a physical button later:
 - [x] Dual display mode (dose status + last opened) behind a flag
 - [x] Dose status as DONE / TAKE / OVERDUE states with headline + subtitle
 - [x] Coarsen PIT wake to 32 s (hardware max) — ~32x fewer wake-ups
-- [x] Partial (no-flash) refresh with full refresh every 5 updates, to kill the
+- [x] Partial (no-flash) refresh with full refresh every 20 updates, to kill the
       black/white flicker; split firmware into app / display / epd modules
+- [ ] Optional: tie full refresh to lid-open, and/or a fast single-flash full
+      LUT, if the periodic flash is still too intense
 
 ## Backlog
 
