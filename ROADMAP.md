@@ -31,6 +31,7 @@ by a physical button later:
 - [x] Fix display orientation (180° rotation)
 - [x] Dual display mode (dose status + last opened) behind a flag
 - [x] Dose status as DONE / TAKE / OVERDUE states with headline + subtitle
+- [x] Coarsen PIT wake to 32 s (hardware max) — ~32x fewer wake-ups
 
 ## Backlog
 

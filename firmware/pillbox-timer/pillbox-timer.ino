@@ -3,8 +3,8 @@
 // shows one of two displays, selected by DEFAULT_MODE below:
 //   MODE_DOSE_STATUS   DONE / TAKE / OVERDUE headline + subtitle — interval-based
 //   MODE_LAST_OPENED   "JUST NOW" / "7H AGO"                     — passive log
-// The RTC's periodic interrupt wakes the chip once per second to keep counting,
-// and the display is refreshed only when the shown text would actually change.
+// The RTC's periodic interrupt wakes the chip every 32 s to keep counting, and
+// the display is refreshed only when the shown text would actually change.
 //
 // Power: chip sleeps in POWER-DOWN (~1µA). The PIT runs off the internal 32kHz
 // oscillator and still ticks in power-down; the reed switch is on a fully
@@ -43,7 +43,8 @@
 #define DEFAULT_MODE     MODE_DOSE_STATUS   // change to switch modes (button later)
 
 // Dose schedule (dose-status mode only), measured from the last lid-open.
-// For bench testing, shrink these (e.g. 20UL and 40UL) so states change fast.
+// Time advances in PIT_TICK_SEC (32 s) steps, so for bench testing use small
+// multiples of 32 (e.g. 32UL and 96UL) to watch states change quickly.
 #define DOSE_DONE_SEC     72000UL   // 20 h: show "DONE" within this window
 #define DOSE_OVERDUE_SEC 100800UL   // 28 h: show "OVERDUE" past this (8 h late)
 
@@ -298,6 +299,12 @@ static void showText(const char* big, const char* sub) {
 // Timekeeping
 // ---------------------------------------------------------------------------
 
+// The PIT wakes the chip on this period. 32 s is the longest single PIT period
+// the hardware can do (32768 cycles of the 1.024 kHz oscillator), which means
+// ~2700 wakes/day instead of 86400 at 1 s — much less wake energy. Time is
+// tracked in 32 s steps, which is plenty for dose state and minute display.
+#define PIT_TICK_SEC 32
+
 volatile uint32_t elapsedSec = 0;
 volatile bool tickFlag = false;
 volatile bool lidFlag  = false;
@@ -306,17 +313,17 @@ char lastSub[16] = "";
 
 ISR(RTC_PIT_vect) {
   RTC.PITINTFLAGS = RTC_PI_bm;   // clear the interrupt
-  elapsedSec++;
+  elapsedSec += PIT_TICK_SEC;
   tickFlag = true;
 }
 
 void reedISR() { lidFlag = true; }   // lid opened (magnet left the switch)
 
 static void rtcPitInit() {
-  RTC.CLKSEL = RTC_CLKSEL_INT32K_gc;                       // 32.768 kHz internal
+  RTC.CLKSEL = RTC_CLKSEL_INT1K_gc;                        // 1.024 kHz internal
   RTC.PITINTCTRL = RTC_PI_bm;                              // enable PIT interrupt
   while (RTC.PITSTATUS & RTC_CTRLBUSY_bm) ;                // wait for sync
-  RTC.PITCTRLA = RTC_PERIOD_CYC32768_gc | RTC_PITEN_bm;    // 32768/32768 Hz = 1 s
+  RTC.PITCTRLA = RTC_PERIOD_CYC32768_gc | RTC_PITEN_bm;    // 32768/1024 Hz = 32 s
 }
 
 // Append a compact duration ("45M", "5H", "3D") at the start of buf.
@@ -365,7 +372,7 @@ static void formatStatus(uint32_t sec, char* big, char* sub) {
 void goToSleep() {
   set_sleep_mode(SLEEP_MODE_PWR_DOWN);
   sleep_enable();
-  sleep_cpu();          // wakes on PIT (1/s) or reed edge (lid open)
+  sleep_cpu();          // wakes on PIT (every 32 s) or reed edge (lid open)
   sleep_disable();
 }
 
