@@ -42,11 +42,18 @@
 #define MODE_DOSE_STATUS 1
 #define DEFAULT_MODE     MODE_DOSE_STATUS   // change to switch modes (button later)
 
+// Set to 1 for fast bench testing (states change in tens of seconds), 0 for the
+// real medication schedule. Remember time advances in PIT_TICK_SEC (32 s) steps.
+#define TEST_MODE 1
+
 // Dose schedule (dose-status mode only), measured from the last lid-open.
-// Time advances in PIT_TICK_SEC (32 s) steps, so for bench testing use small
-// multiples of 32 (e.g. 32UL and 96UL) to watch states change quickly.
-#define DOSE_DONE_SEC     72000UL   // 20 h: show "DONE" within this window
-#define DOSE_OVERDUE_SEC 100800UL   // 28 h: show "OVERDUE" past this (8 h late)
+#if TEST_MODE
+  #define DOSE_DONE_SEC     32UL    // ~1 tick: "DONE"
+  #define DOSE_OVERDUE_SEC  96UL    // ~3 ticks: "OVERDUE"
+#else
+  #define DOSE_DONE_SEC     72000UL // 20 h: show "DONE" within this window
+  #define DOSE_OVERDUE_SEC 100800UL // 28 h: show "OVERDUE" past this (8 h late)
+#endif
 
 uint8_t displayMode = DEFAULT_MODE;   // runtime var so a button can flip it later
 
