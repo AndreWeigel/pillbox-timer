@@ -1,2 +1,4 @@
 # KiCad lock files (created while project is open)
 *.lck
+# KiCad local history (internal backup, not for version control)
+.history/

@@ -17,7 +17,7 @@
 // ---------------------------------------------------------------------------
 // Display
 // ---------------------------------------------------------------------------
-#define DISPLAY_STYLE    STYLE_FUN   // STYLE_PLAIN / STYLE_FUN / STYLE_PIXEL
+#define DISPLAY_STYLE    STYLE_PLAIN   // STYLE_PLAIN / STYLE_FUN / STYLE_PIXEL
 #define FULL_REFRESH_EVERY 20         // 1 full (flashing) refresh per N changes
 
 // ---------------------------------------------------------------------------
@@ -31,7 +31,7 @@
 // Bench-testing shortcut: shrinks dose windows to seconds so states cycle fast.
 // Set to 0 for the real medication schedule.
 // ---------------------------------------------------------------------------
-#define TEST_MODE 1
+#define TEST_MODE 0
 
 #if TEST_MODE
   #define DOSE_DONE_SEC     32UL   // ~1 PIT tick: "DONE" window
