@@ -17,40 +17,11 @@
 #include <avr/interrupt.h>
 #include <stdlib.h>
 #include <string.h>
+#include "config.h"
 #include "display.h"
 
-#define LED_PIN  0
-#define REED_PIN 2
 
-// --- display mode -----------------------------------------------------------
-#define MODE_LAST_OPENED 0
-#define MODE_DOSE_STATUS 1
-#define DEFAULT_MODE     MODE_DOSE_STATUS   // change to switch modes (button later)
-
-uint8_t displayMode = DEFAULT_MODE;         // runtime var so a button can flip it
-
-// Set to 1 for fast bench testing (states change in tens of seconds), 0 for the
-// real medication schedule. Remember time advances in PIT_TICK_SEC (32 s) steps.
-#define TEST_MODE 1
-
-// Dose schedule (dose-status mode only), measured from the last lid-open.
-#if TEST_MODE
-  #define DOSE_DONE_SEC     32UL    // ~1 tick: "DONE"
-  #define DOSE_OVERDUE_SEC  96UL    // ~3 ticks: "OVERDUE"
-#else
-  #define DOSE_DONE_SEC     72000UL // 20 h: show "DONE" within this window
-  #define DOSE_OVERDUE_SEC 100800UL // 28 h: show "OVERDUE" past this (8 h late)
-#endif
-
-// ---------------------------------------------------------------------------
-// Timekeeping. The PIT wakes the chip every 32 s — the longest single PIT
-// period the hardware allows (32768 cycles of the 1.024 kHz oscillator), which
-// means ~2700 wakes/day instead of 86400 at 1 s. 32 s resolution is plenty for
-// dose state and minute display, and lid-open response is unaffected (the reed
-// switch is a separate, instant wake source).
-// ---------------------------------------------------------------------------
-
-#define PIT_TICK_SEC 32
+uint8_t displayMode = DEFAULT_MODE;   // runtime var so a button can flip it later
 
 volatile uint32_t elapsedSec = 0;
 volatile bool tickFlag = false;
@@ -84,26 +55,38 @@ static void fmtDur(uint32_t s, char* buf) {
   *p = '\0';
 }
 
-// Build the headline (big) and subtitle (small) for the active mode.
-static void formatStatus(uint32_t sec, char* big, char* sub) {
+// Build the headline (big) and subtitle (small) for the active mode and style,
+// and return the dose state (the display uses it to pick a face in pixel style).
+// Wording depends on DISPLAY_STYLE; the layout/visuals are the display's job.
+static DoseState formatStatus(uint32_t sec, char* big, char* sub) {
   if (displayMode == MODE_DOSE_STATUS) {
-    if (sec < DOSE_DONE_SEC) {              // still within the done window
-      strcpy(big, "DONE");
-      strcpy(sub, "PILLS TAKEN");
-    } else if (sec < DOSE_OVERDUE_SEC) {    // dose is due
-      strcpy(big, "TAKE");
-      strcpy(sub, "PILLS DUE NOW");
-    } else {                                // well past due
-      strcpy(big, "OVERDUE");
-      fmtDur(sec - DOSE_DONE_SEC, sub);     // how long it has been due
-      strcat(sub, " LATE");                 // e.g. "9H LATE"
+    DoseState st = (sec < DOSE_DONE_SEC)    ? STATE_DONE
+                 : (sec < DOSE_OVERDUE_SEC) ? STATE_TAKE
+                                            : STATE_OVERDUE;
+#if DISPLAY_STYLE == STYLE_FUN
+    switch (st) {
+      case STATE_DONE: strcpy(big, "CHILL");  strcpy(sub, "NOTHING TO DO"); break;
+      case STATE_TAKE: strcpy(big, "PILL TIME"); strcpy(sub, "GO GET EM");    break;
+      default:         strcpy(big, "UGHHH");   fmtDur(sec - DOSE_DONE_SEC, sub);
+                       strcat(sub, " LATE");                                  break;
     }
-  } else {  // MODE_LAST_OPENED
-    sub[0] = '\0';                          // no subtitle
-    if (sec < 60) { strcpy(big, "JUST NOW"); return; }
-    fmtDur(sec, big);
-    strcat(big, " AGO");                    // "7H AGO"
+#else  // STYLE_PLAIN and STYLE_PIXEL share the plain wording (pixel hides big)
+    switch (st) {
+      case STATE_DONE: strcpy(big, "DONE");    strcpy(sub, "PILLS TAKEN");   break;
+      case STATE_TAKE: strcpy(big, "TAKE");    strcpy(sub, "PILLS DUE NOW"); break;
+      default:         strcpy(big, "OVERDUE"); fmtDur(sec - DOSE_DONE_SEC, sub);
+                       strcat(sub, " LATE");                                 break;
+    }
+#endif
+    return st;
   }
+
+  // MODE_LAST_OPENED — passive log, no dose state
+  sub[0] = '\0';
+  if (sec < 60) { strcpy(big, "JUST NOW"); return STATE_INFO; }
+  fmtDur(sec, big);
+  strcat(big, " AGO");                    // "7H AGO"
+  return STATE_INFO;
 }
 
 // ---------------------------------------------------------------------------
@@ -132,8 +115,8 @@ void setup() {
 
   elapsedSec = 0;
   char big[16], sub[16];
-  formatStatus(0, big, sub);
-  displayShow(big, sub);
+  DoseState st = formatStatus(0, big, sub);
+  displayShow(st, big, sub);
 }
 
 void loop() {
@@ -153,6 +136,6 @@ void loop() {
   }
 
   char big[16], sub[16];
-  formatStatus(sec, big, sub);
-  displayShow(big, sub);              // no-ops if unchanged
+  DoseState st = formatStatus(sec, big, sub);
+  displayShow(st, big, sub);          // no-ops if unchanged
 }

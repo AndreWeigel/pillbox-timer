@@ -1,5 +1,6 @@
 #include "display.h"
 #include "epd.h"
+#include "config.h"
 #include <Arduino.h>
 #include <string.h>
 
@@ -107,38 +108,107 @@ static bool inCapsule(int x, int y, int W, int H, int inset) {
   return (y >= cy - rr && y <= cy + rr);
 }
 
-// Render one row of the two-tone capsule pill: black outline, left half filled.
-static void pillRow(int y, uint8_t* dst) {
+// Helpers to set/clear one black pixel in a 25-byte row (0 = black).
+static void rowBlack(uint8_t* dst, int x) {
+  if (x >= 0 && x < 200) dst[x >> 3] &= ~(0x80 >> (x & 7));
+}
+
+// Render one absolute row of a two-tone capsule pill (outline + left half
+// filled), centered horizontally, occupying rows [top, top+H). White elsewhere.
+static void capsuleRowAbs(int absRow, int top, int W, int H, uint8_t* dst) {
   memset(dst, 0xFF, 25);
-  const int x0 = (200 - PILL_W) / 2;
-  for (int px = 0; px < PILL_W; px++) {
-    if (!inCapsule(px, y, PILL_W, PILL_H, 0)) continue;
-    bool inner = inCapsule(px, y, PILL_W, PILL_H, 3);
-    bool black = !inner || (px < PILL_W / 2);
-    if (black) {
-      int x = x0 + px;
-      dst[x >> 3] &= ~(0x80 >> (x & 7));
-    }
+  int y = absRow - top;
+  if (y < 0 || y >= H) return;
+  int x0 = (200 - W) / 2;
+  for (int px = 0; px < W; px++) {
+    if (!inCapsule(px, y, W, H, 0)) continue;
+    bool inner = inCapsule(px, y, W, H, 3);
+    if (!inner || px < W / 2) rowBlack(dst, x0 + px);   // border, or left half
   }
 }
 
-// Row provider for the driver: fills a 25-byte row from whichever element
-// covers it (headline band, pill, subtitle band), else white.
+// --- pixel-art face (eyes + mouth, no outline) ------------------------------
+#define EYE_W      18
+#define EYE_H      18
+#define EYE_TOP    58
+#define EYE_LX     62              // left eye:  x 62..79
+#define EYE_RX     120             // right eye: x 120..137
+#define MOUTH_CX   100
+#define MOUTH_HALF 34              // mouth spans x 66..134
+#define MOUTH_THICK 2
+#define SMILE_BASE 124             // happy: curve centre (lowest point)
+#define FROWN_TOP  100             // worried: curve centre (highest point)
+#define MOUTH_DEPTH 24
+
+// Render one absolute row of a face: square eyes plus a parabolic mouth that
+// smiles (happy) or frowns (worried). White where the row misses both.
+static void faceRow(int absRow, bool happy, uint8_t* dst) {
+  memset(dst, 0xFF, 25);
+  if (absRow >= EYE_TOP && absRow < EYE_TOP + EYE_H) {
+    for (int x = EYE_LX; x < EYE_LX + EYE_W; x++) rowBlack(dst, x);
+    for (int x = EYE_RX; x < EYE_RX + EYE_W; x++) rowBlack(dst, x);
+  }
+  for (int x = MOUTH_CX - MOUTH_HALF; x <= MOUTH_CX + MOUTH_HALF; x++) {
+    long dxn = x - MOUTH_CX;
+    long off = (MOUTH_DEPTH * dxn * dxn) / ((long)MOUTH_HALF * MOUTH_HALF);
+    int cy = happy ? (SMILE_BASE - (int)off) : (FROWN_TOP + (int)off);
+    if (absRow >= cy - MOUTH_THICK && absRow <= cy + MOUTH_THICK) rowBlack(dst, x);
+  }
+}
+
+// Active layout/icon for the row provider; set by setupRender() before each
+// epdWriteRam() call (which calls srcRowBytes synchronously).
+enum Layout { LAYOUT_TEXT, LAYOUT_PIXEL };
+enum Icon   { ICON_PILL, ICON_HAPPY, ICON_WORRIED };
+static Layout gLayout = LAYOUT_TEXT;
+static Icon   gIcon   = ICON_PILL;
+
+#define PIXEL_PILL_TOP 72          // bigger centered pill for pixel layout
+#define PIXEL_PILL_W   120
+#define PIXEL_PILL_H   48
+
+// Row provider for the driver: fills a 25-byte row for the active layout.
 static void srcRowBytes(int row, uint8_t* dst) {
-  if (row >= BIG_TOP && row < BIG_TOP + BIG_H) {
-    memcpy(dst, &bigBand[(row - BIG_TOP) * 25], 25);
-  } else if (row >= PILL_TOP && row < PILL_TOP + PILL_H) {
-    pillRow(row - PILL_TOP, dst);
-  } else if (row >= SUB_TOP && row < SUB_TOP + SUB_H) {
-    memcpy(dst, &subBand[(row - SUB_TOP) * 25], 25);
-  } else {
-    memset(dst, 0xFF, 25);                 // white
+  if (gLayout == LAYOUT_TEXT) {
+    if (row >= BIG_TOP && row < BIG_TOP + BIG_H)
+      memcpy(dst, &bigBand[(row - BIG_TOP) * 25], 25);
+    else if (row >= PILL_TOP && row < PILL_TOP + PILL_H)
+      capsuleRowAbs(row, PILL_TOP, PILL_W, PILL_H, dst);
+    else if (row >= SUB_TOP && row < SUB_TOP + SUB_H)
+      memcpy(dst, &subBand[(row - SUB_TOP) * 25], 25);
+    else
+      memset(dst, 0xFF, 25);
+  } else {  // LAYOUT_PIXEL: big face (or pill) + subtitle
+    if (row >= SUB_TOP && row < SUB_TOP + SUB_H)
+      memcpy(dst, &subBand[(row - SUB_TOP) * 25], 25);
+    else if (gIcon == ICON_PILL)
+      capsuleRowAbs(row, PIXEL_PILL_TOP, PIXEL_PILL_W, PIXEL_PILL_H, dst);
+    else
+      faceRow(row, gIcon == ICON_HAPPY, dst);
   }
 }
 
 static void renderInto(const char* big, const char* sub) {
   renderLine(bigBand, BIG_H, big, BIG_SCALE);
   renderLine(subBand, SUB_H, sub, SUB_SCALE);
+}
+
+// Set the layout, icon, and band contents for one screen. Called for both the
+// new screen and (during a partial refresh) the previous one.
+static void setupRender(DoseState state, const char* big, const char* sub) {
+#if DISPLAY_STYLE == STYLE_PIXEL
+  if (state != STATE_INFO) {
+    gLayout = LAYOUT_PIXEL;
+    gIcon = (state == STATE_DONE) ? ICON_HAPPY
+          : (state == STATE_TAKE) ? ICON_PILL
+                                  : ICON_WORRIED;
+    renderLine(subBand, SUB_H, sub, SUB_SCALE);
+    return;
+  }
+#endif
+  gLayout = LAYOUT_TEXT;
+  gIcon = ICON_PILL;
+  renderInto(big, sub);
 }
 
 // ---------------------------------------------------------------------------
@@ -148,11 +218,10 @@ static void renderInto(const char* big, const char* sub) {
 // lastSub — so we never need to keep a full framebuffer around.
 // ---------------------------------------------------------------------------
 
-#define FULL_REFRESH_EVERY 20  // 1 full (flashing) refresh per this many changes;
-                               // higher = rarer flash, but ghosting builds up more
 
 static char lastBig[16] = "";
 static char lastSub[16] = "";
+static DoseState lastState = STATE_INFO;
 static uint8_t updateCount = 0;
 static bool primed = false;    // has anything been shown yet?
 
@@ -160,22 +229,23 @@ void displaySetup() {
   epdSetup();
 }
 
-void displayShow(const char* big, const char* sub) {
-  if (primed && strcmp(big, lastBig) == 0 && strcmp(sub, lastSub) == 0)
+void displayShow(DoseState state, const char* big, const char* sub) {
+  if (primed && state == lastState &&
+      strcmp(big, lastBig) == 0 && strcmp(sub, lastSub) == 0)
     return;                                        // nothing changed
 
   bool full = (updateCount % FULL_REFRESH_EVERY == 0);  // includes the first show
 
   if (full) {
-    renderInto(big, sub);
+    setupRender(state, big, sub);
     epdInitFull();
     epdWriteRam(0x24, srcRowBytes);                // new image
     epdRefreshFull();
   } else {
     epdInitPartial();
-    renderInto(lastBig, lastSub);
+    setupRender(lastState, lastBig, lastSub);
     epdWriteRam(0x26, srcRowBytes);                // old image (for the diff)
-    renderInto(big, sub);
+    setupRender(state, big, sub);
     epdWriteRam(0x24, srcRowBytes);                // new image
     epdRefreshPartial();
   }
@@ -183,6 +253,7 @@ void displayShow(const char* big, const char* sub) {
 
   strcpy(lastBig, big);
   strcpy(lastSub, sub);
+  lastState = state;
   updateCount++;
   primed = true;
 }
