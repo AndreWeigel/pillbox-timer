@@ -1,12 +1,12 @@
 #include "epd.h"
+#include "config.h"
 
-// Pins are driven directly here so the rest of the firmware never touches them.
-#define DIN_PIN  1
-#define CLK_PIN  3
-#define CS_PIN   4
-#define DC_PIN   5
-#define RST_PIN  6
-#define BUSY_PIN 7
+#define DIN_PIN  EPD_DIN_PIN
+#define CLK_PIN  EPD_CLK_PIN
+#define CS_PIN   EPD_CS_PIN
+#define DC_PIN   EPD_DC_PIN
+#define RST_PIN  EPD_RST_PIN
+#define BUSY_PIN EPD_BUSY_PIN
 
 // Partial-refresh waveform for the SSD1681 1.54" V2, from Waveshare's reference
 // driver (WF_PARTIAL_1IN54_0). Bytes 0..152 are the LUT loaded via 0x32; bytes
